@@ -1,11 +1,42 @@
-# macOS
+# ── Next.js ──────────────────────────────────────────
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+/.next/
+/out/
+/build
+/coverage
+
+# ── Debug logs ───────────────────────────────────────
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ── Env / secrets ────────────────────────────────────
+.env*
+
+# ── TypeScript ───────────────────────────────────────
+*.tsbuildinfo
+next-env.d.ts
+
+# ── Vercel ───────────────────────────────────────────
+.vercel
+
+# ── macOS ────────────────────────────────────────────
 .DS_Store
 .DS_Store?
 ._*
 .Spotlight-V8
 .Trashes
+*.pem
 
-# Agent tooling (local only, not part of the project)
+# ── Agent tooling (local only) ───────────────────────
 .agents/
 skills-lock.json
 .gemini/
