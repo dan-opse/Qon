@@ -1,4 +1,4 @@
-export type TaskType = 'assignment' | 'midterm' | 'exam' | 'quiz' | 'lecture' | 'other';
+export type TaskType = 'assignment' | 'evaluation';
 
 export type UrgencyLevel = 'overdue' | 'critical' | 'warning' | 'normal';
 
@@ -18,4 +18,5 @@ export interface SyncState {
   lastSynced: string | null; // ISO string
   feedUrl: string;
   assignments: Assignment[];
+  completedIds: string[];
 }

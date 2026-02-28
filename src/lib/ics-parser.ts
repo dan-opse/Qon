@@ -1,14 +1,13 @@
 import ICAL from 'ical.js';
 import { Assignment, TaskType } from './types';
 
+/** Keywords that indicate an evaluation (test/quiz/exam/midterm) */
+const EVALUATION_KEYWORDS = /\b(midterm|final\s*exam|examination|exam|quiz|test)\b/i;
+
 function inferTaskType(summary: string, description: string): TaskType {
-    const text = `${summary} ${description}`.toLowerCase();
-    if (/\bmidterm\b/.test(text)) return 'midterm';
-    if (/\b(final\s*exam|examination)\b/.test(text)) return 'exam';
-    if (/\bquiz\b/.test(text)) return 'quiz';
-    if (/\b(assignment|due|submit|submission|problem\s*set|homework|a\d+\s*-\s*due)\b/.test(text)) return 'assignment';
-    if (/\blecture\b/.test(text)) return 'lecture';
-    return 'other';
+    const text = `${summary} ${description}`;
+    if (EVALUATION_KEYWORDS.test(text)) return 'evaluation';
+    return 'assignment';
 }
 
 function extractCourseCode(summary: string, location: string): { courseCode: string; courseName: string } {

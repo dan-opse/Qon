@@ -9,7 +9,7 @@ const lexend = Lexend({
 });
 
 export const metadata: Metadata = {
-  title: "QTracker — Queen's Assignment Tracker",
+  title: "Qon — Queen's Assignment Tracker",
   description: "Track your Queen's University assignments, midterms, exams, and quizzes from your onQ calendar feed.",
 };
 

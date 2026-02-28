@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Assignment, TaskType } from '@/lib/types';
 import { parseICS } from '@/lib/ics-parser';
-import { loadState, saveState, mergeAssignments, clearState } from '@/lib/storage';
+import { loadState, saveState, mergeAssignments, clearState, loadCompletedIds, saveCompletedIds } from '@/lib/storage';
 import { getUrgencyLevel, formatCountdown } from '@/lib/urgency';
 
 // ─── Material Symbol helper ───
@@ -31,21 +32,56 @@ const urgencyStyles = {
   normal: {
     bar: 'bg-slate-500', dateBg: 'bg-white/5', dateColor: 'text-slate-400',
     badge: 'bg-slate-600 text-white', countdown: 'text-slate-400',
-    countdownIcon: 'event', hoverBorder: 'hover:border-slate-400/50',
+    countdownIcon: 'calendar_today', hoverBorder: 'hover:border-slate-400/50',
   },
 };
 
 const typeLabels: Record<TaskType, string> = {
-  assignment: 'Assignment', midterm: 'Midterm', exam: 'Exam',
-  quiz: 'Quiz', lecture: 'Lecture', other: 'Event',
+  assignment: 'Assignment',
+  evaluation: 'Evaluation',
 };
 
-/** Course codes that are not real academic courses — hidden by default */
-const NON_CLASS_CODES = new Set(['GENERAL', 'general', 'General']);
+/**
+ * Official Queen's University Arts & Science course subject codes.
+ * Assignments whose courseCode prefix is NOT in this set are treated as GENERAL.
+ */
+const QUEENSU_COURSE_CODES = new Set([
+  'ANAT', 'ANIM', 'ANSH', 'ARAB', 'ARTH', 'ARIN', 'ASCX', 'ASTR',
+  'BADR', 'BCHM', 'BIOL', 'BLCK',
+  'CANC', 'CRSS', 'CHEM', 'CHIN', 'CLST', 'COGS', 'EPID', 'CISC', 'COCA', 'COMP', 'CWRI',
+  'DISC', 'DRAM', 'DDHT',
+  'ECON', 'EMPR', 'ENGL', 'ENIN', 'ENSC',
+  'FILM', 'ARTF', 'FREN', 'FRST',
+  'GNDS', 'GPHY', 'GEOL', 'GRMN', 'DEVS', 'GREK',
+  'HLTH', 'HEBR', 'HIST',
+  'INDG', 'IDIS', 'INTS', 'INUK', 'ITLN', 'INTN',
+  'JAPN', 'JWST',
+  'KNPE',
+  'LANG', 'LLCU', 'LATN', 'LIBS', 'LISC', 'LING',
+  'MATH', 'MAPP', 'MICR', 'MOHK', 'MUSC', 'MUTH',
+  'NSCI',
+  'PATH', 'PHAR', 'PHIL', 'PHYS', 'PHGY', 'POLS', 'PPEC', 'PORT', 'PSYC',
+  'QGSP',
+  'RELS', 'REPD',
+  'SOCY', 'SPAN', 'STAT', 'STAM',
+  'ARTV',
+  'WELL', 'WRIT',
+]);
+
+/** Extracts the subject prefix (e.g. "CISC" from "CISC 124") */
+function getCoursePrefix(courseCode: string): string {
+  return courseCode.split(/[\s\d]/)[0].toUpperCase();
+}
+
+/** Returns true if the courseCode belongs to a real Queen's U subject */
+function isQUCourse(courseCode: string): boolean {
+  if (courseCode === 'GENERAL') return false;
+  return QUEENSU_COURSE_CODES.has(getCoursePrefix(courseCode));
+}
 
 const DEFAULT_FEED_URL = 'https://onq.queensu.ca/d2l/le/calendar/feed/user/feed.ics?token=aav1w1mkvm0mpa7p4f4bb';
 
-// ─── Context Menu ───
+// ─── Context Menu (portal-based to escape overflow:hidden) ───
 function ContextMenu({
   assignment,
   onHide,
@@ -56,11 +92,31 @@ function ContextMenu({
   onComplete: (id: string) => void;
 }>) {
   const [open, setOpen] = useState(false);
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+
+  // Position the portal menu relative to the trigger button
+  const openMenu = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!open && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setMenuStyle({
+        position: 'fixed',
+        top: rect.bottom + 6,
+        right: window.innerWidth - rect.right,
+        zIndex: 9999,
+      });
+    }
+    setOpen(o => !o);
+  };
 
   useEffect(() => {
     function handleClick(e: MouseEvent) {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
+      if (
+        menuRef.current && !menuRef.current.contains(e.target as Node) &&
+        buttonRef.current && !buttonRef.current.contains(e.target as Node)
+      ) setOpen(false);
     }
     if (open) document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
@@ -78,6 +134,11 @@ function ContextMenu({
       action: () => { window.open('https://onq.queensu.ca', '_blank'); setOpen(false); },
     },
     {
+      icon: 'check_circle',
+      label: 'Mark complete',
+      action: () => { onComplete(assignment.id); setOpen(false); },
+    },
+    {
       icon: 'visibility_off',
       label: 'Hide',
       action: () => { onHide(assignment.id); setOpen(false); },
@@ -86,17 +147,22 @@ function ContextMenu({
   ];
 
   return (
-    <div ref={menuRef} className="relative">
+    <div className="relative">
       <button
-        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+        ref={buttonRef}
+        onClick={openMenu}
         className="flex items-center justify-center size-8 text-slate-400 hover:text-white transition-colors rounded"
         title="More options"
       >
         <Icon name="more_vert" className="text-xl" />
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-9 z-50 w-44 rounded-xl border border-white/10 bg-[#001228] shadow-2xl overflow-hidden animate-fade-in">
+      {open && typeof document !== 'undefined' && createPortal(
+        <div
+          ref={menuRef}
+          style={menuStyle}
+          className="w-44 rounded-xl border border-white/10 bg-[#001228] shadow-2xl overflow-hidden animate-fade-in"
+        >
           {actions.map(({ icon, label, action, danger }) => (
             <button
               key={label}
@@ -109,45 +175,66 @@ function ContextMenu({
               {label}
             </button>
           ))}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
 }
 
-// ─── Complete Button ───
-function CompleteButton({ id, onComplete }: Readonly<{ id: string; onComplete: (id: string) => void }>) {
-  const [confirming, setConfirming] = useState(false);
+// ─── Complete Button (1s flash before committing) ───
+function CompleteButton({
+  id,
+  isCompleted,
+  onComplete,
+  onFlashStart,
+}: Readonly<{
+  id: string;
+  isCompleted: boolean;
+  onComplete: (id: string) => void;
+  onFlashStart?: () => void;
+}>) {
+  const [pending, setPending] = useState(false);
 
   const handleClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirming) {
-      onComplete(id);
-    } else {
-      setConfirming(true);
-      setTimeout(() => setConfirming(false), 2500);
+    if (isCompleted) {
+      onComplete(id); // instant toggle-off
+      return;
     }
+    if (pending) return;
+    setPending(true);
+    onFlashStart?.();
+    setTimeout(() => {
+      onComplete(id);
+      setPending(false);
+    }, 1000);
   };
 
   return (
     <button
       onClick={handleClick}
-      title={confirming ? 'Click again to confirm' : 'Mark complete'}
+      title={isCompleted ? 'Click to undo' : pending ? 'Completing…' : 'Mark complete'}
       className={`flex items-center justify-center size-8 rounded transition-all ${
-        confirming
-          ? 'text-emerald-400 bg-emerald-500/20 hover:bg-emerald-500/30 scale-110'
+        isCompleted
+          ? 'text-emerald-400 bg-emerald-500/20 hover:bg-emerald-500/30'
+          : pending
+          ? 'text-emerald-400 bg-emerald-500/30 scale-110'
           : 'text-slate-500 hover:text-emerald-400 hover:bg-emerald-500/10'
       }`}
     >
-      <Icon name={confirming ? 'check_circle' : 'radio_button_unchecked'} className="text-xl" />
+      <Icon
+        name={isCompleted ? 'check_circle' : pending ? 'check_circle' : 'radio_button_unchecked'}
+        className={`text-xl ${pending ? 'animate-pulse' : ''}`}
+      />
     </button>
   );
 }
 
 // ─── Assignment Card — list layout ───
 function AssignmentCard({
-  assignment, onHide, onComplete,
-}: Readonly<{ assignment: Assignment; onHide: (id: string) => void; onComplete: (id: string) => void }>) {
+  assignment, onHide, onComplete, isCompleted,
+}: Readonly<{ assignment: Assignment; onHide: (id: string) => void; onComplete: (id: string) => void; isCompleted: boolean }>) {
   const [countdown, setCountdown] = useState(formatCountdown(assignment.dueDate));
   const urgency = getUrgencyLevel(assignment.dueDate);
   const style = urgencyStyles[urgency];
@@ -161,35 +248,50 @@ function AssignmentCard({
   const month = due.toLocaleDateString('en-US', { month: 'short', timeZone: 'America/Toronto' }).toUpperCase();
   const day = due.toLocaleDateString('en-US', { day: 'numeric', timeZone: 'America/Toronto' });
 
+  const [flashing, setFlashing] = useState(false);
+  const handleFlashStart = useCallback(() => {
+    setFlashing(true);
+    setTimeout(() => setFlashing(false), 1050);
+  }, []);
+
   return (
-    <div className={`group flex items-stretch bg-queens-blue rounded-xl border border-white/5 overflow-hidden transition-all ${style.hoverBorder} hover:bg-queens-blue/80`}>
-      <div className={`w-1.5 ${style.bar}`} />
+    <div className={`group flex items-stretch rounded-xl border border-white/5 overflow-visible transition-all ${
+      flashing
+        ? 'bg-emerald-500/20 border-emerald-500/40 scale-[1.01]'
+        : isCompleted
+        ? 'bg-queens-blue/30 opacity-50 grayscale border-emerald-600/20'
+        : `bg-queens-blue ${style.hoverBorder} hover:bg-queens-blue/80`
+    }`}>
+      <div className={`w-1.5 rounded-l-xl ${flashing ? 'bg-emerald-400' : isCompleted ? 'bg-emerald-600' : style.bar}`} />
       <div className="flex-1 flex items-center justify-between p-4 gap-4">
         {/* Left: Complete + Date + Info */}
         <div className="flex items-center gap-4 min-w-0">
-          <CompleteButton id={assignment.id} onComplete={onComplete} />
+          <CompleteButton id={assignment.id} isCompleted={isCompleted} onComplete={onComplete} onFlashStart={handleFlashStart} />
           {/* Date block */}
-          <div className={`flex flex-col items-center justify-center ${style.dateBg} rounded-lg p-3 min-w-[64px] shrink-0`}>
-            <span className={`${style.dateColor} text-xs font-bold`}>{month}</span>
+          <div className={`flex flex-col items-center justify-center ${isCompleted ? 'bg-white/5' : style.dateBg} rounded-lg p-3 min-w-[64px] shrink-0`}>
+            <span className={`${isCompleted ? 'text-slate-500' : style.dateColor} text-xs font-bold`}>{month}</span>
             <span className="text-white text-xl font-black">{day}</span>
           </div>
           {/* Info */}
           <div className="min-w-0">
             <div className="flex items-center gap-2 flex-wrap mb-1">
-              {urgency === 'overdue' && (
+              {urgency === 'overdue' && !isCompleted && (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-queens-red text-white uppercase tracking-tighter shrink-0">Overdue</span>
               )}
-              {urgency === 'critical' && (
+              {urgency === 'critical' && !isCompleted && (
                 <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-primary text-background-dark uppercase tracking-tighter shrink-0">Urgent</span>
               )}
-              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${style.badge} uppercase tracking-tighter shrink-0`}>
+              {isCompleted && (
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-600/50 text-emerald-300 uppercase tracking-tighter shrink-0">Done</span>
+              )}
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isCompleted ? 'bg-white/10 text-slate-500' : style.badge} uppercase tracking-tighter shrink-0`}>
                 {typeLabels[assignment.type]}
               </span>
               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-white/10 text-slate-300 shrink-0">
                 {assignment.courseCode}
               </span>
             </div>
-            <h3 className="text-white text-base font-bold group-hover:text-primary transition-colors truncate">
+            <h3 className={`text-base font-bold transition-colors truncate ${isCompleted ? 'text-slate-500 line-through' : 'text-white group-hover:text-primary'}`}>
               {assignment.title}
             </h3>
             <p className="text-slate-400 text-sm truncate">{assignment.courseName}</p>
@@ -197,7 +299,7 @@ function AssignmentCard({
         </div>
         {/* Right: countdown + actions */}
         <div className="text-right flex flex-col items-end gap-2 shrink-0">
-          {urgency === 'overdue' ? (
+          {!isCompleted && (urgency === 'overdue' ? (
             <div className="flex items-center gap-1.5 text-queens-red font-bold text-sm whitespace-nowrap">
               <Icon name="error" className="text-sm" />
               <span>{countdown}</span>
@@ -209,8 +311,8 @@ function AssignmentCard({
               <Icon name={style.countdownIcon} className="text-sm" />
               <span>{countdown}</span>
             </div>
-          )}
-          <ContextMenu assignment={assignment} onHide={onHide} onComplete={onComplete} />
+          ))}
+          {!isCompleted && <ContextMenu assignment={assignment} onHide={onHide} onComplete={onComplete} />}
         </div>
       </div>
     </div>
@@ -219,8 +321,8 @@ function AssignmentCard({
 
 // ─── Assignment Grid Card ───
 function AssignmentGridCard({
-  assignment, onHide, onComplete,
-}: Readonly<{ assignment: Assignment; onHide: (id: string) => void; onComplete: (id: string) => void }>) {
+  assignment, onHide, onComplete, isCompleted,
+}: Readonly<{ assignment: Assignment; onHide: (id: string) => void; onComplete: (id: string) => void; isCompleted: boolean }>) {
   const [countdown, setCountdown] = useState(formatCountdown(assignment.dueDate));
   const urgency = getUrgencyLevel(assignment.dueDate);
   const style = urgencyStyles[urgency];
@@ -234,34 +336,52 @@ function AssignmentGridCard({
   const dateStr = due.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'America/Toronto' });
   const timeStr = due.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true, timeZone: 'America/Toronto' });
 
+  const [flashing, setFlashing] = useState(false);
+  const handleFlashStart = useCallback(() => {
+    setFlashing(true);
+    setTimeout(() => setFlashing(false), 1050);
+  }, []);
+
   return (
-    <div className={`group flex flex-col bg-queens-blue rounded-xl border border-white/5 overflow-hidden transition-all ${style.hoverBorder} hover:bg-queens-blue/80`}>
-      <div className={`h-1.5 ${style.bar}`} />
+    <div className={`group flex flex-col rounded-xl border border-white/5 overflow-visible transition-all ${
+      flashing
+        ? 'bg-emerald-500/20 border-emerald-500/40 scale-[1.01]'
+        : isCompleted
+        ? 'bg-queens-blue/30 opacity-50 grayscale border-emerald-600/20'
+        : `bg-queens-blue ${style.hoverBorder} hover:bg-queens-blue/80`
+    }`}>
+      <div className={`h-1.5 ${flashing ? 'bg-emerald-400' : isCompleted ? 'bg-emerald-600' : style.bar}`} />
       <div className="p-4 flex flex-col gap-3 flex-1">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 flex-wrap min-w-0">
-            {urgency === 'overdue' && (
+            {urgency === 'overdue' && !isCompleted && (
               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-queens-red text-white uppercase tracking-tighter shrink-0">Overdue</span>
             )}
-            {urgency === 'critical' && (
+            {urgency === 'critical' && !isCompleted && (
               <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-primary text-background-dark uppercase tracking-tighter shrink-0">Urgent</span>
             )}
-            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${style.badge} uppercase tracking-tighter shrink-0`}>
+            {isCompleted && (
+              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-600/50 text-emerald-300 uppercase tracking-tighter shrink-0">Done</span>
+            )}
+            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${isCompleted ? 'bg-white/10 text-slate-500' : style.badge} uppercase tracking-tighter shrink-0`}>
               {typeLabels[assignment.type]}
             </span>
           </div>
           <div className="flex items-center gap-1 shrink-0">
-            <CompleteButton id={assignment.id} onComplete={onComplete} />
-            <ContextMenu assignment={assignment} onHide={onHide} onComplete={onComplete} />
+            <CompleteButton id={assignment.id} isCompleted={isCompleted} onComplete={onComplete} onFlashStart={handleFlashStart} />
+            {!isCompleted && <ContextMenu assignment={assignment} onHide={onHide} onComplete={onComplete} />}
           </div>
         </div>
         <span className="text-xs font-bold text-slate-400 uppercase tracking-wide">{assignment.courseCode}</span>
-        <h3 className="text-white font-bold leading-snug group-hover:text-primary transition-colors line-clamp-2 flex-1">
+        <h3 className={`font-bold leading-snug transition-colors line-clamp-2 flex-1 ${
+          isCompleted ? 'text-slate-500 line-through' : 'text-white group-hover:text-primary'
+        }`}>
           {assignment.title}
         </h3>
-        <div className={`flex items-center gap-1.5 ${style.countdown} text-sm font-bold mt-auto pt-3 border-t border-white/5`}>
-          <Icon name={style.countdownIcon} className="text-sm" />
-          <span>{countdown}</span>
+        <div className={`flex items-center gap-1.5 ${isCompleted ? 'text-slate-600' : style.countdown} text-sm font-bold mt-auto pt-3 border-t border-white/5`}>
+          {!isCompleted && <Icon name={style.countdownIcon} className="text-sm" />}
+          {isCompleted ? <Icon name="check_circle" className="text-sm text-emerald-600" /> : null}
+          <span>{isCompleted ? 'Completed' : countdown}</span>
           <span className="ml-auto text-slate-500 text-xs font-normal">{dateStr} · {timeStr}</span>
         </div>
       </div>
@@ -275,11 +395,17 @@ function CourseFilterBar({
   activeCourses,
   onToggle,
   onSelectAll,
+  showOverdue,
+  onToggleOverdue,
+  overdueCount,
 }: Readonly<{
   courses: string[];
   activeCourses: Set<string>;
   onToggle: (code: string) => void;
   onSelectAll: () => void;
+  showOverdue: boolean;
+  onToggleOverdue: () => void;
+  overdueCount: number;
 }>) {
   const allActive = courses.every(c => activeCourses.has(c));
 
@@ -298,9 +424,8 @@ function CourseFilterBar({
         All
       </button>
 
-      {/* Per-course toggles */}
+      {/* Per-course toggles (only real QU courses) */}
       {courses.map(code => {
-        const isClass = !NON_CLASS_CODES.has(code);
         const active = activeCourses.has(code);
         return (
           <button
@@ -308,9 +433,7 @@ function CourseFilterBar({
             onClick={() => onToggle(code)}
             className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ${
               active
-                ? isClass
-                  ? 'bg-queens-blue border-primary text-primary'
-                  : 'bg-queens-blue border-slate-500 text-slate-300'
+                ? 'bg-queens-blue border-primary text-primary'
                 : 'bg-transparent border-white/10 text-slate-500 hover:border-white/20 hover:text-slate-400'
             }`}
           >
@@ -318,6 +441,21 @@ function CourseFilterBar({
           </button>
         );
       })}
+
+      {/* Show Overdue toggle */}
+      {overdueCount > 0 && (
+        <button
+          onClick={onToggleOverdue}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all border ml-auto ${
+            showOverdue
+              ? 'bg-queens-red/20 border-queens-red text-queens-red'
+              : 'bg-transparent border-white/10 text-slate-500 hover:border-queens-red/50 hover:text-queens-red/70'
+          }`}
+        >
+          <Icon name="history" className="text-sm" />
+          {showOverdue ? 'Hide Overdue' : `Show Overdue (${overdueCount})`}
+        </button>
+      )}
     </div>
   );
 }
@@ -513,35 +651,36 @@ export default function Home() {
   const [view, setView] = useState<'dashboard' | 'calendar'>('dashboard');
   const [loaded, setLoaded] = useState(false);
   const [gridLayout, setGridLayout] = useState(false);
+  const [showOverdue, setShowOverdue] = useState(false);
 
   // ─── Course filter state ───
-  // Derived list of unique course codes from assignments
+  // Only show real Queen's U course codes in the filter
   const allCourseCodes = useMemo(() => {
     const codes = new Set<string>();
-    for (const a of assignments) codes.add(a.courseCode);
+    for (const a of assignments) {
+      if (isQUCourse(a.courseCode)) codes.add(a.courseCode);
+    }
     return Array.from(codes).sort();
   }, [assignments]);
 
-  // Active (visible) courses — class courses on by default, GENERAL off by default
   const [activeCourses, setActiveCourses] = useState<Set<string>>(new Set());
   const [courseFilterInitialized, setCourseFilterInitialized] = useState(false);
 
-  // When assignments first load, initialize the active courses
+  // When assignments first load, initialize all real QU courses as active
   useEffect(() => {
     if (!courseFilterInitialized && allCourseCodes.length > 0) {
-      const defaults = new Set(allCourseCodes.filter(c => !NON_CLASS_CODES.has(c)));
-      setActiveCourses(defaults);
+      setActiveCourses(new Set(allCourseCodes));
       setCourseFilterInitialized(true);
     }
   }, [allCourseCodes, courseFilterInitialized]);
 
-  // When a new sync brings new course codes, add them (as active if they're classes)
+  // When a new sync brings new course codes, add them as active
   useEffect(() => {
     if (courseFilterInitialized && allCourseCodes.length > 0) {
       setActiveCourses(prev => {
         const next = new Set(prev);
         for (const code of allCourseCodes) {
-          if (!prev.has(code) && !NON_CLASS_CODES.has(code)) next.add(code);
+          if (!prev.has(code)) next.add(code);
         }
         return next;
       });
@@ -549,11 +688,17 @@ export default function Home() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [allCourseCodes]);
 
+  // Load state from localStorage on mount
   useEffect(() => {
     const state = loadState();
-    if (state.assignments.length > 0) setAssignments(state.assignments);
+    // Filter out any GENERAL items that may have been previously stored
+    const cleanAssignments = state.assignments.filter(a => a.courseCode !== 'GENERAL');
+    if (cleanAssignments.length > 0) setAssignments(cleanAssignments);
     if (state.feedUrl) setFeedUrl(state.feedUrl);
     if (state.lastSynced) setLastSynced(state.lastSynced);
+    // Load persisted completed IDs
+    const savedCompleted = loadCompletedIds();
+    if (savedCompleted.size > 0) setCompleted(savedCompleted);
     setLoaded(true);
   }, []);
 
@@ -569,12 +714,16 @@ export default function Home() {
       const res = await fetch(`/api/ics?url=${encodeURIComponent(feedUrl)}`);
       if (!res.ok) throw new Error('Failed to fetch');
       const icsText = await res.text();
-      const parsed = parseICS(icsText);
-      const merged = mergeAssignments(assignments, parsed);
+      // Filter out GENERAL (non-course) items immediately after parsing
+      const parsed = parseICS(icsText).filter(a => a.courseCode !== 'GENERAL');
+      const merged = mergeAssignments(
+        assignments.filter(a => a.courseCode !== 'GENERAL'), // purge old GENERAL items too
+        parsed
+      );
       const now = new Date().toISOString();
       setAssignments(merged);
       setLastSynced(now);
-      saveState({ feedUrl, lastSynced: now, assignments: merged });
+      saveState({ feedUrl, lastSynced: now, assignments: merged, completedIds: [] });
     } catch (err) {
       console.error('Sync failed:', err);
     } finally {
@@ -585,7 +734,16 @@ export default function Home() {
   const handleHide = useCallback((id: string) => setHidden(prev => new Set([...prev, id])), []);
 
   const handleComplete = useCallback((id: string) => {
-    setCompleted(prev => new Set([...prev, id]));
+    setCompleted(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id); // toggle off
+      } else {
+        next.add(id);
+      }
+      saveCompletedIds(next);
+      return next;
+    });
   }, []);
 
   const handleToggleCourse = useCallback((code: string) => {
@@ -600,30 +758,53 @@ export default function Home() {
     setActiveCourses(new Set(allCourseCodes));
   }, [allCourseCodes]);
 
-  const handleClear = () => { setAssignments([]); setLastSynced(null); clearState(); setCourseFilterInitialized(false); };
-  const handleFeedUrlChange = (url: string) => { setFeedUrl(url); saveState({ feedUrl: url, lastSynced, assignments }); };
+  const handleClear = () => {
+    setAssignments([]);
+    setLastSynced(null);
+    setCompleted(new Set());
+    clearState();
+    saveCompletedIds(new Set());
+    setCourseFilterInitialized(false);
+  };
+  const handleFeedUrlChange = (url: string) => {
+    setFeedUrl(url);
+    saveState({ feedUrl: url, lastSynced, assignments, completedIds: [] });
+  };
 
   // ─── Computed ───
   const now = new Date();
+
+  // All assignments not hidden (completed ones stay visible for gray-out)
   const visibleAssignments = useMemo(
-    () => assignments.filter(a => !hidden.has(a.id) && !completed.has(a.id)),
-    [assignments, hidden, completed]
+    () => assignments.filter(a => !hidden.has(a.id)),
+    [assignments, hidden]
   );
-  const activeAssignments = visibleAssignments.filter(a => new Date(a.dueDate) >= now);
-  const overdueAssignments = visibleAssignments.filter(a => new Date(a.dueDate) < now);
+
+  const activeAssignments = visibleAssignments.filter(a => new Date(a.dueDate) >= now && !completed.has(a.id));
+  const overdueAssignments = visibleAssignments.filter(a => new Date(a.dueDate) < now && !completed.has(a.id));
   const dueTodayCount = activeAssignments.filter(a => new Date(a.dueDate).toDateString() === now.toDateString()).length;
   const dueThisWeekCount = activeAssignments.filter(a => new Date(a.dueDate) <= new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)).length;
   const nextDueThisWeek = activeAssignments.find(a => new Date(a.dueDate) <= new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000));
 
   const displayAssignments = useMemo(() => {
-    const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     return visibleAssignments
       .filter(a => {
-        const afterCutoff = new Date(a.dueDate) >= sevenDaysAgo;
-        const courseActive = activeCourses.has(a.courseCode);
-        return afterCutoff && courseActive;
+        const dueTime = new Date(a.dueDate).getTime();
+        const isOverdue = dueTime < now.getTime();
+        // Always show completed items (so they appear grayed out)
+        if (completed.has(a.id)) return activeCourses.has(a.courseCode) || !isQUCourse(a.courseCode);
+        // Hide overdue unless toggle is on
+        if (isOverdue && !showOverdue) return false;
+        // Filter by active courses (non-QU courses shown when any course active)
+        if (isQUCourse(a.courseCode)) return activeCourses.has(a.courseCode);
+        // Non-QU course codes: only show if at least one course filter is active
+        return activeCourses.size > 0;
       })
       .sort((a, b) => {
+        // Completed go to bottom
+        const aComp = completed.has(a.id) ? 1 : 0;
+        const bComp = completed.has(b.id) ? 1 : 0;
+        if (aComp !== bComp) return aComp - bComp;
         const aTime = new Date(a.dueDate).getTime();
         const bTime = new Date(b.dueDate).getTime();
         const aOverdue = aTime < now.getTime() ? 0 : 1;
@@ -631,21 +812,24 @@ export default function Home() {
         if (aOverdue !== bOverdue) return aOverdue - bOverdue;
         return aTime - bTime;
       });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleAssignments, activeCourses]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleAssignments, activeCourses, showOverdue, completed]);
 
   // ─── Shared toolbar render ───
   const filterBar = allCourseCodes.length > 0 && (
     <div className="mb-6 p-4 bg-queens-blue/50 rounded-xl border border-white/5">
       <div className="flex items-center justify-between mb-3">
         <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">Filter by Course</span>
-        <span className="text-xs text-slate-500">{displayAssignments.length} shown</span>
+        <span className="text-xs text-slate-500">{displayAssignments.filter(a => !completed.has(a.id)).length} shown</span>
       </div>
       <CourseFilterBar
         courses={allCourseCodes}
         activeCourses={activeCourses}
         onToggle={handleToggleCourse}
         onSelectAll={handleSelectAllCourses}
+        showOverdue={showOverdue}
+        onToggleOverdue={() => setShowOverdue(s => !s)}
+        overdueCount={overdueAssignments.length}
       />
     </div>
   );
@@ -655,7 +839,7 @@ export default function Home() {
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
         {items.map((a, idx) => (
           <div key={a.id} className="animate-fade-in" style={{ animationDelay: `${idx * 30}ms` }}>
-            <AssignmentGridCard assignment={a} onHide={handleHide} onComplete={handleComplete} />
+            <AssignmentGridCard assignment={a} onHide={handleHide} onComplete={handleComplete} isCompleted={completed.has(a.id)} />
           </div>
         ))}
       </div>
@@ -663,7 +847,7 @@ export default function Home() {
       <div className="flex flex-col gap-4">
         {items.map((a, idx) => (
           <div key={a.id} className="animate-fade-in" style={{ animationDelay: `${idx * 30}ms` }}>
-            <AssignmentCard assignment={a} onHide={handleHide} onComplete={handleComplete} />
+            <AssignmentCard assignment={a} onHide={handleHide} onComplete={handleComplete} isCompleted={completed.has(a.id)} />
           </div>
         ))}
       </div>
@@ -695,7 +879,7 @@ export default function Home() {
             <div className="size-8 flex items-center justify-center bg-primary rounded-lg text-background-dark">
               <Icon name="school" className="font-bold" />
             </div>
-            <h2 className="text-white text-2xl font-bold leading-tight tracking-tight">QTracker</h2>
+            <h2 className="text-white text-2xl font-bold leading-tight tracking-tight">Qon</h2>
           </div>
           <nav className="flex items-center gap-6 ml-4">
             {(['dashboard', 'calendar'] as const).map(tab => (
